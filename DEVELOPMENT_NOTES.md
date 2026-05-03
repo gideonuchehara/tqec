@@ -171,3 +171,41 @@ grep -rn "breakpoint()" tests/ src/
 | `uv run <cmd>` | Run a command inside the venv without activating |
 | `uv python list` | List available Python versions |
 | `uv python install 3.12` | Install a specific Python version |
+
+---
+
+## 8. Pauli Webs and Correlation Surfaces
+
+### What is a Pauli Web?
+
+A **Pauli web** (from the pyzx library) labels each **half-edge** of a ZX graph with a Pauli operator (X, Y, or Z). The "RGB" naming in the pyzx demo notebook maps R=X, G=Z, B=Y. A Pauli web is "closed" when every spider's adjacent half-edges form a stabilizer of that spider.
+
+Reference notebook: https://nbviewer.org/github/zxcalc/pyzx/blob/master/demos/PauliWebsRGB.ipynb
+
+### How it relates to tqec's CorrelationSurface
+
+tqec's `CorrelationSurface` is the same concept, embedded in 3D topological quantum error correction. Instead of coloring half-edges on an abstract ZX diagram, it tracks how logical Pauli operators flow through a quantum error correction circuit topology.
+
+The interop layer in `src/tqec/interop/pyzx/correlation.py` converts between the two representations.
+
+### The single-node round-trip bug (PR #926)
+
+pyzx's `PauliWeb` stores half-edges — `(v, w)` is the end of an edge nearest to `v`. This **requires an actual edge to exist**. A single isolated node (no edges) has no half-edges, so pyzx has nowhere to store the Pauli label.
+
+tqec's `CorrelationSurface` *does* support single-node surfaces (stored as a self-loop `ZXEdge(node, node)`), which exposed a gap when converting to/from `PauliWeb`.
+
+**Three chained bugs were fixed:**
+
+1. `_graph_view` in `correlation.py` duplicated self-loop edges (u==v inserted twice), causing XOR cancellation: `Pauli.Z ^ Pauli.Z = Pauli.I`.
+2. `_to_mutable_graph_representation` called `is_hadamard(zx_graph, (u, u))` on a ghost edge that doesn't exist in the ZX graph.
+3. pyzx silently drops self-loop half-edges — `pauli_web.half_edges()` returns `{}` for single-node graphs.
+
+**Fix strategy:** detect the single-node case upfront in `pauli_web_to_correlation_surface` and reconstruct the surface directly from the vertex type, bypassing `PauliWeb` entirely.
+
+### X↔Z basis flip (important)
+
+The correlation surface basis is the **opposite** of the spider's own type:
+- X-type spider → `Basis.Z` surface
+- Z-type spider → `Basis.X` surface
+
+This is because a single X spider is stabilized by Z operators on its legs, and vice versa. Always pass `zx_graph.phase(u)` alongside `zx_graph.type(u)` to `vertex_type_to_pauli` so non-zero phase vertices (e.g. S node with phase=1/2 → `Pauli.Y`) are handled correctly.
